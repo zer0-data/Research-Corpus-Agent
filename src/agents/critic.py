@@ -1,80 +1,52 @@
 """
 critic.py — Answer quality critic agent.
 
-Checks the analyst's answer for gaps, unsupported claims, and hallucinations
-by comparing it against the retrieved passages. Returns structured feedback.
+Checks the analyst's answer for hallucinations, gaps, and contradictions
+by comparing against the retrieved documents. Returns a structured verdict.
 """
 
 import logging
-from typing import Optional
 
-from src.utils.llm_client import LLMClient
+from src.utils.llm_client import call_llm
 from src.utils.parsers import parse_json_response
-from src.observability.logger import ObservabilityLogger
 
 logger = logging.getLogger(__name__)
 
 # ── System Prompt ────────────────────────────────────────────────────────────
 
-CRITIC_SYSTEM_PROMPT = """You are a research answer critic. Your job is to evaluate answers generated from retrieved ArXiv paper passages for quality, accuracy, and completeness.
+CRITIC_SYSTEM_PROMPT = (
+    "You are a critic reviewing a research answer. Check for: "
+    "hallucinations (claims not in the docs), gaps (query aspects not addressed), "
+    "contradictions. Classify the failure type. "
+    "Return JSON only: "
+    '{"verdict": "pass or revise", '
+    '"failure_type": "hallucination or retrieval_failure or reasoning_failure or gap or null", '
+    '"issues": ["list of strings"], '
+    '"evidence": ["list of strings"], '
+    '"revised_answer": "string or null"}'
+)
 
-Evaluate the answer on these dimensions:
-1. **Faithfulness**: Are all claims supported by the provided passages? Flag any unsupported statements.
-2. **Completeness**: Does the answer address all aspects of the question? Identify any gaps.
-3. **Citation accuracy**: Are citations used correctly? Are sources properly attributed?
-4. **Coherence**: Is the answer well-organized and logically structured?
-5. **Hallucination check**: Does the answer contain any fabricated facts, paper titles, or findings not in the passages?
+# ── Default Verdict ──────────────────────────────────────────────────────────
 
-Respond with a JSON object:
-{
-  "verdict": "pass" | "fail" | "partial",
-  "confidence": 0.0 to 1.0,
-  "issues": [
-    {
-      "type": "hallucination" | "unsupported_claim" | "missing_coverage" | "citation_error" | "coherence_issue",
-      "description": "specific description of the issue",
-      "severity": "low" | "medium" | "high"
-    }
-  ],
-  "strengths": ["list of things done well"],
-  "summary": "one-paragraph overall assessment"
-}"""
+_DEFAULT_VERDICT = {
+    "verdict": "pass",
+    "failure_type": None,
+    "issues": [],
+    "evidence": [],
+    "revised_answer": None,
+}
 
 
 # ── Critic Agent ─────────────────────────────────────────────────────────────
 
 class CriticAgent:
-    """Evaluates answer quality and checks for hallucinations."""
-
-    def __init__(
-        self,
-        llm_client: Optional[LLMClient] = None,
-        obs_logger: Optional[ObservabilityLogger] = None,
-    ):
-        """
-        Args:
-            llm_client: LLMClient instance (creates default if None)
-            obs_logger: ObservabilityLogger instance (optional)
-        """
-        self.llm = llm_client or LLMClient()
-        self.obs_logger = obs_logger
-
-    def _format_passages_for_review(self, passages: list[dict]) -> str:
-        """Format passages for the critic's review."""
-        parts = []
-        for i, p in enumerate(passages[:15]):
-            metadata = p.get("metadata", {})
-            paper_id = metadata.get("paper_id", "unknown")
-            title = metadata.get("title", "Untitled")
-            parts.append(f"[Source {i+1}] ID: {paper_id} | Title: {title}\n{p.get('text', '')}")
-        return "\n\n---\n\n".join(parts)
+    """Evaluates answer quality and checks for hallucinations/gaps."""
 
     def critique(
         self,
         query: str,
         answer: str,
-        passages: list[dict],
-        query_id: str = "",
+        docs: list[dict],
     ) -> dict:
         """
         Evaluate an answer for quality, accuracy, and completeness.
@@ -82,74 +54,68 @@ class CriticAgent:
         Args:
             query: Original research question
             answer: Generated answer to evaluate
-            passages: Retrieved passages used to generate the answer
-            query_id: Parent query ID for logging
+            docs: Retrieved documents used for the answer
 
         Returns:
-            Dict with verdict, confidence, issues, strengths, summary
+            Dict with keys: verdict, failure_type, issues, evidence, revised_answer
         """
-        sources = self._format_passages_for_review(passages)
+        # Build source context for the critic
+        source_parts = []
+        for i, doc in enumerate(docs[:5]):
+            metadata = doc.get("metadata", {})
+            title = metadata.get("title", doc.get("title", "Untitled"))
+            paper_id = metadata.get("paper_id", doc.get("doc_id", "unknown"))
+            text = doc.get("text", "")
+            source_parts.append(
+                f"[Source {i+1}] Title: {title} (ID: {paper_id})\n{text}"
+            )
 
-        user_message = (
-            f"## Research Question\n{query}\n\n"
-            f"## Generated Answer\n{answer}\n\n"
-            f"## Source Passages\n{sources}\n\n"
-            f"Please evaluate the answer quality. Respond with the JSON evaluation."
+        sources = "\n\n---\n\n".join(source_parts)
+
+        prompt = (
+            f"<|im_start|>system\n{CRITIC_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Query: {query}\n\n"
+            f"Answer:\n{answer}\n\n"
+            f"Source Documents:\n{sources}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
         )
 
-        response = self.llm.chat(
-            messages=[{"role": "user", "content": user_message}],
-            system_prompt=CRITIC_SYSTEM_PROMPT,
-            temperature=0.1,
-            max_tokens=1024,
-        )
+        raw = call_llm(prompt, max_tokens=512)
 
-        # Parse response
-        default_result = {
-            "verdict": "partial",
-            "confidence": 0.5,
-            "issues": [{"type": "coherence_issue", "description": "Could not parse critic response", "severity": "medium"}],
-            "strengths": [],
-            "summary": "Critic evaluation could not be fully parsed.",
-        }
+        try:
+            result = parse_json_response(raw)
+        except ValueError:
+            logger.warning("Critic parse failed, defaulting to pass verdict")
+            return _DEFAULT_VERDICT.copy()
 
-        result = parse_json_response(response, fallback=default_result)
         if not isinstance(result, dict):
-            result = default_result
+            return _DEFAULT_VERDICT.copy()
 
-        # Ensure required fields
-        result.setdefault("verdict", "partial")
-        result.setdefault("confidence", 0.5)
+        # Normalize and validate fields
+        result.setdefault("verdict", "pass")
+        result.setdefault("failure_type", None)
         result.setdefault("issues", [])
-        result.setdefault("strengths", [])
-        result.setdefault("summary", "")
+        result.setdefault("evidence", [])
+        result.setdefault("revised_answer", None)
 
-        # Log verdict
-        if self.obs_logger and query_id:
-            issue_descriptions = [
-                iss.get("description", "") if isinstance(iss, dict) else str(iss)
-                for iss in result["issues"]
-            ]
-            self.obs_logger.log_verdict(
-                query_id=query_id,
-                verdict=result["verdict"],
-                confidence=result["confidence"],
-                issues=issue_descriptions,
-                answer_excerpt=answer[:500],
-            )
+        # Ensure verdict is valid
+        if result["verdict"] not in ("pass", "revise"):
+            result["verdict"] = "pass"
 
-            self.obs_logger.log_decision(
-                query_id=query_id,
-                agent_name="critic",
-                action="critique",
-                input_summary=f"Query: {query[:200]} | Answer: {len(answer)} chars",
-                output_summary=f"Verdict: {result['verdict']} ({result['confidence']:.2f})",
-                reasoning=result.get("summary", ""),
-            )
+        # Ensure failure_type is valid
+        valid_failures = {
+            "hallucination", "retrieval_failure",
+            "reasoning_failure", "gap", None,
+        }
+        if result["failure_type"] not in valid_failures:
+            result["failure_type"] = None
 
         logger.info(
-            "Critic verdict: %s (confidence: %.2f, issues: %d)",
-            result["verdict"], result["confidence"], len(result["issues"]),
+            "Critic: verdict=%s, failure_type=%s, issues=%d",
+            result["verdict"],
+            result["failure_type"],
+            len(result["issues"]),
         )
 
         return result

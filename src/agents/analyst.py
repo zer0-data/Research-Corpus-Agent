@@ -1,32 +1,22 @@
 """
 analyst.py — Synthesis agent for generating cited answers.
 
-Receives retrieved passages and the original query, then uses an LLM to
-produce a coherent, well-cited research answer.
+Receives the original query and top retrieved documents, then uses Qwen2.5
+to produce a technical, cited research answer.
 """
 
 import logging
-from typing import Optional
 
-from src.utils.llm_client import LLMClient
-from src.observability.logger import ObservabilityLogger
+from src.utils.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
 # ── System Prompt ────────────────────────────────────────────────────────────
 
-ANALYST_SYSTEM_PROMPT = """You are a research analyst AI. Your job is to synthesize information from retrieved ArXiv paper passages into a coherent, well-cited answer to a research question.
-
-Rules:
-1. ONLY use information from the provided passages — do not hallucinate facts
-2. Cite papers using [Paper ID] format (e.g., [2301.12345])
-3. When multiple papers discuss similar findings, synthesize across them
-4. Organize your answer with clear structure (use headings if appropriate)
-5. Explicitly note if the passages are insufficient to fully answer the question
-6. Use precise technical language appropriate for a research audience
-7. If passages contain conflicting findings, present both sides with citations
-
-Format your response as a structured research answer."""
+ANALYST_SYSTEM_PROMPT = (
+    "You are a research analyst. Answer the query using only the provided papers. "
+    "Cite paper titles inline. Be specific and technical."
+)
 
 
 # ── Analyst Agent ────────────────────────────────────────────────────────────
@@ -34,100 +24,53 @@ Format your response as a structured research answer."""
 class AnalystAgent:
     """Synthesizes retrieved passages into a coherent, cited answer."""
 
-    def __init__(
-        self,
-        llm_client: Optional[LLMClient] = None,
-        obs_logger: Optional[ObservabilityLogger] = None,
-        max_context_passages: int = 15,
-    ):
+    def analyze(self, query: str, docs: list[dict]) -> str:
         """
-        Args:
-            llm_client: LLMClient instance (creates default if None)
-            obs_logger: ObservabilityLogger instance (optional)
-            max_context_passages: Maximum passages to include in context
-        """
-        self.llm = llm_client or LLMClient()
-        self.obs_logger = obs_logger
-        self.max_context_passages = max_context_passages
+        Synthesize an answer from the query and retrieved documents.
 
-    def _format_context(self, passages: list[dict]) -> str:
-        """Format retrieved passages into a context string for the LLM."""
-        context_parts = []
-
-        for i, passage in enumerate(passages[:self.max_context_passages]):
-            metadata = passage.get("metadata", {})
-            paper_id = metadata.get("paper_id", "unknown")
-            title = metadata.get("title", "Untitled")
-            year = metadata.get("year", "")
-            chunk_type = metadata.get("chunk_type", "abstract")
-
-            header = f"[Passage {i+1}] Paper: {paper_id} | Title: {title} | Year: {year} | Type: {chunk_type}"
-            text = passage.get("text", "")
-
-            context_parts.append(f"{header}\n{text}")
-
-        return "\n\n---\n\n".join(context_parts)
-
-    def analyze(
-        self,
-        query: str,
-        passages: list[dict],
-        query_id: str = "",
-    ) -> str:
-        """
-        Synthesize an answer from retrieved passages.
+        Uses top 5 documents to build the context window.
 
         Args:
             query: The original user research question
-            passages: List of retrieved passage dicts
-            query_id: Parent query ID for logging
+            docs: List of retrieved doc dicts (must have 'text' and 'metadata')
 
         Returns:
-            Synthesized answer string with citations
+            Synthesized answer string with inline citations
         """
-        if not passages:
-            no_result = (
-                "I could not find sufficient information in the corpus to answer "
-                "this question. The retrieval system returned no relevant passages. "
-                "Consider rephrasing your query or checking that the relevant papers "
-                "have been indexed."
+        if not docs:
+            return (
+                "No relevant documents were found in the corpus. "
+                "Consider rephrasing the query or verifying that the "
+                "relevant papers have been indexed."
             )
-            return no_result
 
-        # Format context
-        context = self._format_context(passages)
-        num_passages = min(len(passages), self.max_context_passages)
+        # Build context from top 5 docs
+        context_parts = []
+        for i, doc in enumerate(docs[:5]):
+            metadata = doc.get("metadata", {})
+            title = metadata.get("title", doc.get("title", "Untitled"))
+            paper_id = metadata.get("paper_id", doc.get("doc_id", "unknown"))
+            text = doc.get("text", "")
 
-        # Build prompt
-        user_message = (
-            f"Research Question: {query}\n\n"
-            f"I have retrieved {num_passages} relevant passages from ArXiv papers. "
-            f"Please synthesize a comprehensive answer based on these passages.\n\n"
-            f"Retrieved Passages:\n\n{context}"
+            context_parts.append(
+                f"[Paper {i+1}] Title: {title} (ID: {paper_id})\n{text}"
+            )
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        prompt = (
+            f"<|im_start|>system\n{ANALYST_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n"
+            f"Query: {query}\n\n"
+            f"Retrieved Papers:\n\n{context}\n\n"
+            f"Provide a comprehensive, cited answer.<|im_end|>\n"
+            f"<|im_start|>assistant\n"
         )
 
-        # Call LLM
-        answer = self.llm.chat(
-            messages=[{"role": "user", "content": user_message}],
-            system_prompt=ANALYST_SYSTEM_PROMPT,
-            max_tokens=2048,
-            temperature=0.3,
-        )
-
-        # Log decision
-        if self.obs_logger and query_id:
-            self.obs_logger.log_decision(
-                query_id=query_id,
-                agent_name="analyst",
-                action="synthesize",
-                input_summary=f"Query: {query[:200]} | {num_passages} passages",
-                output_summary=f"Answer: {len(answer)} chars",
-                reasoning=f"Used {num_passages}/{len(passages)} passages",
-            )
+        answer = call_llm(prompt, max_tokens=512)
 
         logger.info(
-            "Analyst synthesized answer (%d chars) from %d passages",
-            len(answer), num_passages,
+            "Analyst: generated %d-char answer from %d docs for: %s",
+            len(answer), min(len(docs), 5), query[:80],
         )
-
         return answer

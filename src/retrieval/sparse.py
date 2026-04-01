@@ -1,7 +1,8 @@
 """
 sparse.py — BM25 sparse retrieval using rank_bm25.
 
-Loads the pickled BM25 index built by embed.py and provides search functionality.
+Loads the pickled BM25 index built by embed.py and provides ranked retrieval.
+All computation is local — no external API calls.
 """
 
 import pickle
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 BM25_PATH = Path("data/bm25_index.pkl")
 
 
-# ── BM25 Retriever ───────────────────────────────────────────────────────────
+# ── Sparse Retriever ─────────────────────────────────────────────────────────
 
 class SparseRetriever:
     """Sparse retrieval using BM25 (rank_bm25)."""
@@ -44,21 +45,20 @@ class SparseRetriever:
         self.documents = bm25_data["documents"]
         self.metadatas = bm25_data["metadatas"]
 
-        logger.info("BM25 index loaded — %d documents", len(self.documents))
+        logger.info("SparseRetriever ready — %d documents indexed", len(self.documents))
 
-    def search(self, query: str, top_k: int = 20) -> list[dict]:
+    def retrieve(self, query: str, top_k: int = 50) -> list[dict]:
         """
-        Search the BM25 index for the most relevant chunks.
+        Retrieve the most relevant chunks via BM25 keyword scoring.
 
         Args:
             query: Search query string
             top_k: Number of results to return
 
         Returns:
-            List of result dicts with keys:
-                id, text, score, metadata
+            List of result dicts: {doc_id, text, metadata, score}
         """
-        # Tokenize query (matching the indexing tokenization)
+        # Tokenize query (matching the indexing tokenization: whitespace + lowercase)
         tokenized_query = query.lower().split()
 
         # Get BM25 scores for all documents
@@ -73,14 +73,10 @@ class SparseRetriever:
                 break  # No more relevant results
 
             results.append({
-                "id": self.chunk_ids[idx],
+                "doc_id": self.chunk_ids[idx],
                 "text": self.documents[idx],
-                "score": float(scores[idx]),
                 "metadata": self.metadatas[idx],
+                "score": float(scores[idx]),
             })
 
         return results
-
-    def batch_search(self, queries: list[str], top_k: int = 20) -> list[list[dict]]:
-        """Run multiple queries."""
-        return [self.search(q, top_k) for q in queries]

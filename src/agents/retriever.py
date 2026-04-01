@@ -1,17 +1,14 @@
 """
 retriever.py — Hybrid search agent for sub-task retrieval.
 
-For each sub-task from the planner, runs fusion retrieval (dense + sparse)
-followed by cross-encoder reranking. Returns aggregated context passages.
+For each sub-task from the planner, delegates to the HybridRetriever pipeline
+(dense + sparse + ColBERT → RRF → reranker). Returns aggregated context passages.
 """
 
 import logging
 from typing import Optional
 
-from src.retrieval.dense import DenseRetriever
-from src.retrieval.sparse import SparseRetriever
-from src.retrieval.fusion import FusionRetriever
-from src.retrieval.reranker import Reranker
+from src.retrieval import HybridRetriever
 from src.observability.logger import ObservabilityLogger
 
 logger = logging.getLogger(__name__)
@@ -24,37 +21,19 @@ class RetrieverAgent:
 
     def __init__(
         self,
-        dense_retriever: Optional[DenseRetriever] = None,
-        sparse_retriever: Optional[SparseRetriever] = None,
-        reranker: Optional[Reranker] = None,
+        hybrid_retriever: Optional[HybridRetriever] = None,
         obs_logger: Optional[ObservabilityLogger] = None,
-        fusion_k: int = 60,
-        retrieval_top_k: int = 50,
-        rerank_top_k: int = 10,
+        top_n: int = 10,
     ):
         """
         Args:
-            dense_retriever: DenseRetriever instance
-            sparse_retriever: SparseRetriever instance
-            reranker: Reranker instance
+            hybrid_retriever: HybridRetriever instance (created with defaults if None)
             obs_logger: ObservabilityLogger instance
-            fusion_k: RRF constant
-            retrieval_top_k: Number of results per retriever before fusion
-            rerank_top_k: Number of results after reranking
+            top_n: Number of results per sub-task after reranking
         """
-        self.dense = dense_retriever
-        self.sparse = sparse_retriever
-        self.reranker = reranker
+        self.retriever = hybrid_retriever or HybridRetriever(obs_logger=obs_logger)
         self.obs_logger = obs_logger
-        self.retrieval_top_k = retrieval_top_k
-        self.rerank_top_k = rerank_top_k
-
-        # Build fusion retriever
-        self.fusion = FusionRetriever(
-            dense_retriever=self.dense,
-            sparse_retriever=self.sparse,
-            rrf_k=fusion_k,
-        )
+        self.top_n = top_n
 
     def retrieve_for_subtask(
         self,
@@ -75,43 +54,20 @@ class RetrieverAgent:
         if not sub_query:
             return []
 
-        # Step 1: Fusion retrieval (dense + sparse)
-        fused_results = self.fusion.search(
-            query=sub_query,
-            top_k=self.retrieval_top_k,
-        )
+        # Run full hybrid pipeline (dense + sparse + ColBERT → RRF → reranker)
+        results = self.retriever.search(query=sub_query, top_n=self.top_n)
 
-        # Log fusion results
+        # Log retrieval results
         if self.obs_logger and query_id:
             self.obs_logger.log_retrieval(
                 query_id=query_id,
                 sub_query=sub_query,
-                retriever_type="fusion",
-                doc_ids=[r["id"] for r in fused_results],
-                scores=[r.get("rrf_score", 0.0) for r in fused_results],
+                retriever_type="hybrid_reranked",
+                doc_ids=[r["doc_id"] for r in results],
+                scores=[r.get("rerank_score", r.get("rrf_score", 0.0)) for r in results],
             )
 
-        # Step 2: Reranking
-        if self.reranker and fused_results:
-            reranked = self.reranker.rerank(
-                query=sub_query,
-                candidates=fused_results,
-                top_k=self.rerank_top_k,
-            )
-
-            # Log reranked results
-            if self.obs_logger and query_id:
-                self.obs_logger.log_retrieval(
-                    query_id=query_id,
-                    sub_query=sub_query,
-                    retriever_type="reranked",
-                    doc_ids=[r["id"] for r in reranked],
-                    scores=[r.get("rerank_score", 0.0) for r in reranked],
-                )
-
-            return reranked
-
-        return fused_results[:self.rerank_top_k]
+        return results
 
     def retrieve(
         self,
@@ -143,7 +99,7 @@ class RetrieverAgent:
             passages = self.retrieve_for_subtask(sub_task, query_id=query_id)
 
             for passage in passages:
-                pid = passage.get("id", "")
+                pid = passage.get("doc_id", "")
                 if deduplicate and pid in seen_ids:
                     continue
                 seen_ids.add(pid)

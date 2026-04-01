@@ -1,8 +1,8 @@
 """
 reranker.py — Cross-encoder re-ranking of retrieved passages.
 
-Uses cross-encoder/ms-marco-MiniLM-L-12-v2 to re-score query-document pairs
-and return a re-ranked list.
+Uses cross-encoder/ms-marco-MiniLM-L-6-v2 loaded locally on T4 GPU
+to re-score (query, passage) pairs for precision reranking.
 """
 
 import logging
@@ -15,13 +15,19 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
-DEFAULT_BATCH_SIZE = 32
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+DEFAULT_BATCH_SIZE = 64
 
 
-# ── Reranker ─────────────────────────────────────────────────────────────────
+def _detect_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
-class Reranker:
+
+# ── CrossEncoderReranker ─────────────────────────────────────────────────────
+
+class CrossEncoderReranker:
     """Cross-encoder reranker for refining retrieval results."""
 
     def __init__(
@@ -31,45 +37,49 @@ class Reranker:
         batch_size: int = DEFAULT_BATCH_SIZE,
     ):
         """
-        Initialize the cross-encoder reranker.
-
         Args:
             model_name: HuggingFace cross-encoder model ID
-            device: Device for the model ('cuda', 'cpu', or None for auto)
+            device: Device (None = auto-detect)
             batch_size: Batch size for scoring
         """
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = device or _detect_device()
 
-        logger.info("Loading reranker: %s on %s", model_name, device)
+        logger.info("Loading CrossEncoderReranker: %s on %s", model_name, device)
         self.model = CrossEncoder(model_name, device=device)
         self.batch_size = batch_size
-        logger.info("Reranker loaded successfully")
+        logger.info("CrossEncoderReranker ready")
 
     def rerank(
         self,
         query: str,
-        candidates: list[dict],
-        top_k: Optional[int] = None,
+        docs: list[dict],
+        top_n: int = 10,
     ) -> list[dict]:
         """
-        Re-rank candidate passages using the cross-encoder.
+        Re-rank candidate documents using cross-encoder scoring.
 
         Args:
             query: The search query
-            candidates: List of candidate dicts, each must have a 'text' key.
-                        Other keys (id, metadata, etc.) are preserved.
-            top_k: Number of top results to return (None = all re-ranked)
+            docs: List of candidate dicts, each must have a 'text' key
+            top_n: Number of top results to return
 
         Returns:
-            Re-ranked list of candidate dicts, sorted by cross-encoder score
-            descending. Each dict gets a 'rerank_score' key added.
+            Re-ranked top_n list sorted by cross-encoder score descending.
+            Each dict gets a 'rerank_score' key added.
         """
-        if not candidates:
+        if not docs:
             return []
 
-        # Build query-document pairs
-        pairs = [(query, c["text"]) for c in candidates]
+        # Build (query, passage) pairs
+        pairs = [(query, doc["text"]) for doc in docs if doc.get("text")]
+
+        # If some docs had no text, we can only score those with text
+        scorable_docs = [doc for doc in docs if doc.get("text")]
+        unscorable_docs = [doc for doc in docs if not doc.get("text")]
+
+        if not pairs:
+            logger.warning("No scorable documents (all missing text)")
+            return docs[:top_n]
 
         # Score all pairs
         scores = self.model.predict(
@@ -78,24 +88,29 @@ class Reranker:
             show_progress_bar=False,
         )
 
-        # Attach scores to candidates
-        scored_candidates = []
-        for candidate, score in zip(candidates, scores):
-            entry = candidate.copy()
+        # Attach scores
+        scored_docs = []
+        for doc, score in zip(scorable_docs, scores):
+            entry = doc.copy()
             entry["rerank_score"] = float(score)
-            scored_candidates.append(entry)
+            scored_docs.append(entry)
 
         # Sort by rerank score descending
-        scored_candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+        scored_docs.sort(key=lambda x: x["rerank_score"], reverse=True)
 
-        if top_k is not None:
-            scored_candidates = scored_candidates[:top_k]
+        # Append unscorable docs at the end (below the scored ones)
+        for doc in unscorable_docs:
+            entry = doc.copy()
+            entry["rerank_score"] = float("-inf")
+            scored_docs.append(entry)
+
+        result = scored_docs[:top_n]
 
         logger.debug(
-            "Reranked %d candidates → top score: %.4f, bottom score: %.4f",
-            len(scored_candidates),
-            scored_candidates[0]["rerank_score"] if scored_candidates else 0,
-            scored_candidates[-1]["rerank_score"] if scored_candidates else 0,
+            "Reranked %d docs → top_n=%d (best: %.4f, worst: %.4f)",
+            len(docs), len(result),
+            result[0]["rerank_score"] if result else 0,
+            result[-1]["rerank_score"] if result else 0,
         )
 
-        return scored_candidates
+        return result

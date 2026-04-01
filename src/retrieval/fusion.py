@@ -1,152 +1,99 @@
 """
-fusion.py — Reciprocal Rank Fusion (RRF) for combining multiple retrieval results.
+fusion.py — Reciprocal Rank Fusion for combining multiple retrieval results.
 
-Merges ranked lists from dense, sparse, and optionally ColBERT retrievers
-using the RRF formula: score(d) = Σ 1 / (k + rank_i(d))
+Implements 3-way RRF across dense (BGE), ColBERT, and sparse (BM25) retrievers.
+Falls back to 2-way RRF when ColBERT is disabled (memory pressure on T4).
+
+RRF formula: score(d) = Σ 1 / (k + rank_i(d))   where k=60
 """
 
 import logging
 from collections import defaultdict
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-DEFAULT_K = 60  # RRF constant (standard value from the original paper)
+DEFAULT_K = 60  # RRF constant (Cormack et al., 2009)
 
 
-# ── RRF Implementation ───────────────────────────────────────────────────────
+# ── HybridFuser ──────────────────────────────────────────────────────────────
 
-def reciprocal_rank_fusion(
-    ranked_lists: list[list[dict]],
-    k: int = DEFAULT_K,
-    top_k: Optional[int] = None,
-) -> list[dict]:
+class HybridFuser:
     """
-    Combine multiple ranked result lists using Reciprocal Rank Fusion.
+    Reciprocal Rank Fusion across 2 or 3 retrieval result lists.
 
-    Formula: score(d) = Σ 1 / (k + rank_i(d))
-
-    Args:
-        ranked_lists: List of ranked result lists. Each result dict must
-                      have at least an 'id' key. Other keys (text, metadata)
-                      are preserved from the first occurrence.
-        k: RRF constant (default 60, from Cormack et al. 2009)
-        top_k: Number of results to return (None = all)
-
-    Returns:
-        Fused ranked list of result dicts, sorted by RRF score descending.
-        Each dict has 'id', 'text', 'metadata', 'rrf_score',
-        and 'source_ranks' showing per-retriever ranks.
-    """
-    # Accumulate RRF scores
-    rrf_scores: dict[str, float] = defaultdict(float)
-    doc_data: dict[str, dict] = {}
-    source_ranks: dict[str, dict[str, int]] = defaultdict(dict)
-
-    for list_idx, ranked_list in enumerate(ranked_lists):
-        retriever_name = f"retriever_{list_idx}"
-
-        for rank, result in enumerate(ranked_list, start=1):
-            doc_id = result["id"]
-            rrf_scores[doc_id] += 1.0 / (k + rank)
-            source_ranks[doc_id][retriever_name] = rank
-
-            # Keep first occurrence's data
-            if doc_id not in doc_data:
-                doc_data[doc_id] = {
-                    "id": doc_id,
-                    "text": result.get("text", ""),
-                    "metadata": result.get("metadata", {}),
-                }
-
-    # Build fused results
-    fused = []
-    for doc_id, score in rrf_scores.items():
-        entry = doc_data[doc_id].copy()
-        entry["rrf_score"] = score
-        entry["source_ranks"] = dict(source_ranks[doc_id])
-        fused.append(entry)
-
-    # Sort by RRF score descending
-    fused.sort(key=lambda x: x["rrf_score"], reverse=True)
-
-    if top_k is not None:
-        fused = fused[:top_k]
-
-    return fused
-
-
-# ── Fusion Retriever (Convenience Wrapper) ───────────────────────────────────
-
-class FusionRetriever:
-    """
-    Combines dense, sparse, and optionally ColBERT retrievers using RRF.
+    Merges by doc_id, computes RRF score from each list's rank,
+    and returns a deduplicated, re-ranked merged list.
     """
 
-    def __init__(
+    def __init__(self, k: int = DEFAULT_K):
+        """
+        Args:
+            k: RRF constant (default 60)
+        """
+        self.k = k
+
+    def fuse(
         self,
-        dense_retriever=None,
-        sparse_retriever=None,
-        colbert_retriever=None,
-        rrf_k: int = DEFAULT_K,
-    ):
+        dense_results: list[dict],
+        sparse_results: list[dict],
+        colbert_results: list[dict] = None,
+    ) -> list[dict]:
         """
-        Args:
-            dense_retriever: DenseRetriever instance (or None to skip)
-            sparse_retriever: SparseRetriever instance (or None to skip)
-            colbert_retriever: ColBERT retriever instance (or None to skip)
-            rrf_k: RRF constant
-        """
-        self.dense = dense_retriever
-        self.sparse = sparse_retriever
-        self.colbert = colbert_retriever
-        self.rrf_k = rrf_k
-
-        active = sum(1 for r in [self.dense, self.sparse, self.colbert] if r is not None)
-        logger.info("FusionRetriever initialized with %d active retrievers", active)
-
-    def search(self, query: str, top_k: int = 20, per_retriever_k: int = 50) -> list[dict]:
-        """
-        Run hybrid search across all active retrievers and fuse results.
+        Perform Reciprocal Rank Fusion across retriever results.
 
         Args:
-            query: Search query string
-            top_k: Number of final fused results to return
-            per_retriever_k: Number of results to fetch from each retriever
+            dense_results: Ranked results from DenseRetriever
+            sparse_results: Ranked results from SparseRetriever
+            colbert_results: Ranked results from ColBERTRetriever (optional)
 
         Returns:
-            Fused ranked list of result dicts
+            Fused, deduplicated, re-ranked list of result dicts.
+            Each dict has: doc_id, text, metadata, rrf_score, source_ranks
         """
-        ranked_lists = []
+        # Collect all result lists with labels
+        retriever_lists = [
+            ("dense", dense_results),
+            ("sparse", sparse_results),
+        ]
+        if colbert_results is not None:
+            retriever_lists.append(("colbert", colbert_results))
 
-        if self.dense is not None:
-            try:
-                dense_results = self.dense.search(query, top_k=per_retriever_k)
-                ranked_lists.append(dense_results)
-                logger.debug("Dense returned %d results", len(dense_results))
-            except Exception as e:
-                logger.error("Dense retrieval failed: %s", e)
+        # Accumulate RRF scores per doc_id
+        rrf_scores: dict[str, float] = defaultdict(float)
+        doc_data: dict[str, dict] = {}
+        source_ranks: dict[str, dict[str, int]] = defaultdict(dict)
 
-        if self.sparse is not None:
-            try:
-                sparse_results = self.sparse.search(query, top_k=per_retriever_k)
-                ranked_lists.append(sparse_results)
-                logger.debug("Sparse returned %d results", len(sparse_results))
-            except Exception as e:
-                logger.error("Sparse retrieval failed: %s", e)
+        for retriever_name, ranked_list in retriever_lists:
+            for rank, result in enumerate(ranked_list, start=1):
+                doc_id = result["doc_id"]
+                rrf_scores[doc_id] += 1.0 / (self.k + rank)
+                source_ranks[doc_id][retriever_name] = rank
 
-        if self.colbert is not None:
-            try:
-                colbert_results = self.colbert.search(query, top_k=per_retriever_k)
-                ranked_lists.append(colbert_results)
-                logger.debug("ColBERT returned %d results", len(colbert_results))
-            except Exception as e:
-                logger.error("ColBERT retrieval failed: %s", e)
+                # Keep the richest data (prefer entries with text)
+                if doc_id not in doc_data or (not doc_data[doc_id].get("text") and result.get("text")):
+                    doc_data[doc_id] = {
+                        "doc_id": doc_id,
+                        "text": result.get("text", ""),
+                        "metadata": result.get("metadata", {}),
+                    }
 
-        if not ranked_lists:
-            logger.warning("No retriever returned results for query: %s", query[:100])
-            return []
+        # Build fused output sorted by RRF score descending
+        fused = []
+        for doc_id in rrf_scores:
+            entry = doc_data[doc_id].copy()
+            entry["rrf_score"] = rrf_scores[doc_id]
+            entry["source_ranks"] = dict(source_ranks[doc_id])
+            fused.append(entry)
 
-        return reciprocal_rank_fusion(ranked_lists, k=self.rrf_k, top_k=top_k)
+        fused.sort(key=lambda x: x["rrf_score"], reverse=True)
+
+        logger.debug(
+            "RRF fusion: %d unique docs from %d retrievers (top score: %.5f)",
+            len(fused),
+            len(retriever_lists),
+            fused[0]["rrf_score"] if fused else 0.0,
+        )
+
+        return fused

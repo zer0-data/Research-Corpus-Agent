@@ -33,6 +33,7 @@ BM25_PATH = DATA_DIR / "bm25_index.pkl"
 COLBERT_DIR = DATA_DIR / "colbert_index"
 SUMMARY_FILE = DATA_DIR / "ingestion_summary.json"
 CHECKPOINT_FILE = DATA_DIR / "embed_checkpoint.json"
+PDF_DIR = DATA_DIR / "pdfs"
 
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 DOC_PREFIX = "Represent this passage for retrieval: "
@@ -273,14 +274,74 @@ def build_colbert_index(chunks: list[dict]) -> int:
 
 # ── Main Pipeline ────────────────────────────────────────────────────────────
 
+def _extract_vision_chunks() -> list[dict]:
+    """
+    Extract figure and table chunks from PDFs in data/pdfs/.
+
+    Scans the PDF directory, runs FigureExtractor on each PDF,
+    and returns all visual chunks. Skips gracefully if the directory
+    is empty or doesn't exist.
+    """
+    if not PDF_DIR.exists():
+        logger.warning(
+            "PDF directory %s not found. Skipping figure/table extraction. "
+            "Create it and add PDFs to enable vision extraction.",
+            PDF_DIR,
+        )
+        return []
+
+    pdf_files = list(PDF_DIR.glob("*.pdf"))
+    if not pdf_files:
+        logger.warning("No PDF files found in %s. Skipping vision extraction.", PDF_DIR)
+        return []
+
+    try:
+        from src.pipeline.vision import FigureExtractor
+    except ImportError:
+        logger.warning("Could not import FigureExtractor. Skipping vision extraction.")
+        return []
+
+    try:
+        extractor = FigureExtractor()
+    except (ValueError, Exception) as e:
+        logger.warning("FigureExtractor init failed (%s). Skipping vision extraction.", e)
+        return []
+
+    all_visual_chunks = []
+
+    for pdf_path in tqdm(pdf_files, desc="Extracting figures/tables from PDFs"):
+        # Derive paper_id from filename (e.g., "2301.12345.pdf" → "2301.12345")
+        paper_id = pdf_path.stem
+        title = paper_id  # Best-effort; metadata not always available
+
+        try:
+            figures = extractor.extract_from_pdf(str(pdf_path), paper_id, title)
+            tables = extractor.extract_tables_as_markdown(str(pdf_path), paper_id, title)
+            all_visual_chunks.extend(figures)
+            all_visual_chunks.extend(tables)
+        except Exception as e:
+            logger.warning("Vision extraction failed for %s: %s", pdf_path.name, e)
+            continue
+
+    logger.info(
+        "Vision extraction complete: %d figure chunks, %d table chunks from %d PDFs",
+        sum(1 for c in all_visual_chunks if c.get("chunk_type") == "figure"),
+        sum(1 for c in all_visual_chunks if c.get("chunk_type") == "table"),
+        len(pdf_files),
+    )
+    return all_visual_chunks
+
+
 def run_embedding(resume: bool = True) -> dict:
     """
     Run the full embedding pipeline:
-    1. Load chunks (with optional resume from checkpoint)
-    2. Build Chroma dense index
-    3. Build BM25 sparse index
-    4. Build ColBERT PLAID index
-    5. Update ingestion summary
+    1. Load text chunks (with optional resume from checkpoint)
+    2. Extract figure/table chunks from PDFs in data/pdfs/
+    3. Merge all chunks
+    4. Build Chroma dense index
+    5. Build BM25 sparse index
+    6. Build ColBERT PLAID index
+    7. Update ingestion summary
 
     Returns:
         dict with embedding statistics
@@ -295,9 +356,22 @@ def run_embedding(resume: bool = True) -> dict:
     if start_from > 0:
         logger.info("Resuming from checkpoint: %d docs already processed", start_from)
 
-    # Load chunks
+    # Load text chunks
     chunks, total_in_file = _load_chunks(start_from=start_from)
-    logger.info("Loaded %d chunks to process (total in file: %d)", len(chunks), total_in_file)
+    logger.info("Loaded %d text chunks to process (total in file: %d)", len(chunks), total_in_file)
+
+    # Extract figure/table chunks from PDFs
+    vision_chunks = _extract_vision_chunks()
+    figure_count = sum(1 for c in vision_chunks if c.get("chunk_type") == "figure")
+    table_count = sum(1 for c in vision_chunks if c.get("chunk_type") == "table")
+
+    # Merge vision chunks into main chunk list
+    if vision_chunks:
+        logger.info(
+            "Appending %d vision chunks (%d figures, %d tables) to %d text chunks",
+            len(vision_chunks), figure_count, table_count, len(chunks),
+        )
+        chunks.extend(vision_chunks)
 
     if not chunks:
         logger.info("No new chunks to process.")
@@ -319,6 +393,9 @@ def run_embedding(resume: bool = True) -> dict:
     # Update summary
     stats = {
         "total_chunks_embedded": start_from + len(chunks),
+        "text_chunks": len(chunks) - len(vision_chunks),
+        "figure_chunks": figure_count,
+        "table_chunks": table_count,
         "chroma_indexed": chroma_count,
         "bm25_indexed": bm25_count,
         "colbert_indexed": colbert_count,

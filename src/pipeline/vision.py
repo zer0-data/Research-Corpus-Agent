@@ -1,258 +1,357 @@
 """
 vision.py — Figure and table extraction from PDF papers using Qwen2.5-VL.
 
-Renders PDF pages to images via PyMuPDF, then uses Qwen2.5-VL to detect
-and describe figures/tables, producing structured chunk records.
+Uses the HuggingFace Serverless Inference API with Qwen/Qwen2.5-VL-3B-Instruct
+to describe figures and extract tables from academic PDFs. Returns embeddable
+text chunks identical in format to regular text chunks.
 """
 
 import io
 import json
 import logging
+import os
+import re
 from pathlib import Path
-from typing import Optional
 
-import torch
+import fitz  # pymupdf
+from huggingface_hub import InferenceClient
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-VISION_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
-DEFAULT_DPI = 200
-MAX_IMAGE_SIZE = 1280  # Max dimension for model input
+VISION_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
+MAX_FIGURES_PER_PAPER = 5
+MIN_IMAGE_DIMENSION = 100  # Skip images smaller than 100x100 (icons/logos)
+MAX_THUMBNAIL_SIZE = 512
 
 
-# ── Model Loading ────────────────────────────────────────────────────────────
+# ── FigureExtractor ──────────────────────────────────────────────────────────
 
-_model = None
-_processor = None
+class FigureExtractor:
+    """
+    Extracts figures and tables from academic PDFs using Qwen2.5-VL
+    via HuggingFace Serverless Inference API.
+    """
 
-
-def _load_vision_model(device: Optional[str] = None):
-    """Load Qwen2.5-VL model and processor (lazy, singleton)."""
-    global _model, _processor
-
-    if _model is not None:
-        return _model, _processor
-
-    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    logger.info("Loading vision model %s on %s...", VISION_MODEL_ID, device)
-
-    _processor = AutoProcessor.from_pretrained(VISION_MODEL_ID)
-
-    load_kwargs = {"torch_dtype": torch.float16}
-    if device == "cuda":
-        load_kwargs["device_map"] = "auto"
-        try:
-            from transformers import BitsAndBytesConfig
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+    def __init__(self, hf_token: str = None):
+        """
+        Args:
+            hf_token: HuggingFace API token. Falls back to HF_TOKEN env var.
+        """
+        token = hf_token or os.environ.get("HF_TOKEN")
+        if not token:
+            raise ValueError(
+                "HuggingFace token required. Set HF_TOKEN environment variable "
+                "or pass hf_token= to FigureExtractor."
             )
-        except ImportError:
-            logger.warning("bitsandbytes not available; loading in float16 without quantization")
 
-    _model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        VISION_MODEL_ID, **load_kwargs
-    )
-
-    if device != "cuda":
-        _model = _model.to(device)
-
-    _model.eval()
-    logger.info("Vision model loaded successfully")
-    return _model, _processor
-
-
-# ── PDF Rendering ────────────────────────────────────────────────────────────
-
-def _render_pdf_pages(pdf_path: str, dpi: int = DEFAULT_DPI) -> list[Image.Image]:
-    """Render all pages of a PDF to PIL images using PyMuPDF."""
-    import fitz  # pymupdf
-
-    doc = fitz.open(pdf_path)
-    images = []
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        # Render at specified DPI
-        zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat)
-
-        img_data = pix.tobytes("png")
-        img = Image.open(io.BytesIO(img_data)).convert("RGB")
-
-        # Resize if too large
-        if max(img.size) > MAX_IMAGE_SIZE:
-            ratio = MAX_IMAGE_SIZE / max(img.size)
-            new_size = (int(img.width * ratio), int(img.height * ratio))
-            img = img.resize(new_size, Image.LANCZOS)
-
-        images.append(img)
-
-    doc.close()
-    return images
-
-
-# ── Vision Analysis ──────────────────────────────────────────────────────────
-
-FIGURE_TABLE_PROMPT = """Analyze this page from a scientific paper. 
-If there are any figures or tables present, describe each one in detail:
-1. Identify whether it is a FIGURE or TABLE
-2. Provide the figure/table number if visible
-3. Give a detailed description of its content, data, or visualization
-4. Explain what the figure/table demonstrates in the context of the paper
-
-If there are NO figures or tables on this page, respond with exactly: NO_FIGURES_OR_TABLES
-
-Format your response as JSON:
-[
-  {
-    "type": "figure" or "table",
-    "number": "Figure 1" or "Table 2" etc.,
-    "description": "detailed description",
-    "significance": "what it shows/demonstrates"
-  }
-]
-"""
-
-
-def _analyze_page(
-    image: Image.Image,
-    page_num: int,
-    model,
-    processor,
-) -> list[dict]:
-    """
-    Use Qwen2.5-VL to detect and describe figures/tables on a page.
-
-    Returns list of dicts with type, number, description, significance.
-    """
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": FIGURE_TABLE_PROMPT},
-            ],
-        }
-    ]
-
-    text_input = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = processor(
-        text=[text_input],
-        images=[image],
-        return_tensors="pt",
-        padding=True,
-    )
-
-    device = next(model.parameters()).device
-    inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
-
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=1024,
-            temperature=0.1,
-            do_sample=False,
+        self.client = InferenceClient(
+            model=VISION_MODEL_ID,
+            token=token,
         )
+        logger.info("FigureExtractor initialized with model: %s", VISION_MODEL_ID)
 
-    # Decode only the generated tokens
-    generated_ids = output_ids[:, inputs["input_ids"].shape[1]:]
-    response = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    # ── Figure Extraction ────────────────────────────────────────────────
 
-    if "NO_FIGURES_OR_TABLES" in response:
-        return []
+    def extract_from_pdf(
+        self,
+        pdf_path: str,
+        paper_id: str,
+        title: str,
+    ) -> list[dict]:
+        """
+        Extract and describe figures from a PDF using VL model.
 
-    # Parse JSON response
-    try:
-        # Try to extract JSON from response
-        import re
-        json_match = re.search(r'\[.*\]', response, re.DOTALL)
-        if json_match:
-            items = json.loads(json_match.group())
-            for item in items:
-                item["page_num"] = page_num
-            return items
-    except (json.JSONDecodeError, AttributeError):
-        logger.warning("Failed to parse vision model output for page %d", page_num)
+        Opens the PDF, extracts embedded images, filters out small icons,
+        and uses Qwen2.5-VL to generate text descriptions for up to
+        MAX_FIGURES_PER_PAPER qualifying images.
 
-    return []
+        Args:
+            pdf_path: Path to the PDF file
+            paper_id: ArXiv paper ID
+            title: Paper title
+
+        Returns:
+            List of chunk dicts with chunk_type="figure"
+        """
+        pdf_path_obj = Path(pdf_path)
+        if not pdf_path_obj.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+        doc = fitz.open(pdf_path)
+        figure_chunks = []
+        figure_index = 0
+
+        for page_num in range(len(doc)):
+            if figure_index >= MAX_FIGURES_PER_PAPER:
+                break
+
+            page = doc[page_num]
+            image_list = page.get_images(full=True)
+
+            for img_info in image_list:
+                if figure_index >= MAX_FIGURES_PER_PAPER:
+                    break
+
+                xref = img_info[0]
+
+                try:
+                    base_image = doc.extract_image(xref)
+                    if not base_image:
+                        continue
+
+                    image_bytes = base_image["image"]
+                    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+                    # Skip small images (icons, logos, decorations)
+                    if img.width < MIN_IMAGE_DIMENSION or img.height < MIN_IMAGE_DIMENSION:
+                        continue
+
+                    # Resize to thumbnail for API
+                    img.thumbnail(
+                        (MAX_THUMBNAIL_SIZE, MAX_THUMBNAIL_SIZE),
+                        Image.LANCZOS,
+                    )
+
+                    # Call HF Inference API
+                    response = self.client.visual_question_answering(
+                        image=img,
+                        question=(
+                            "Describe this academic figure: chart type, "
+                            "what is measured, main result. Be concise and technical."
+                        ),
+                    )
+
+                    # Extract generated text from response
+                    if isinstance(response, list) and len(response) > 0:
+                        description = response[0].get("answer", "").strip()
+                    elif hasattr(response, "generated_text"):
+                        description = response.generated_text.strip()
+                    elif isinstance(response, str):
+                        description = response.strip()
+                    else:
+                        description = str(response).strip()
+
+                    if not description:
+                        continue
+
+                    chunk = {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "chunk_type": "figure",
+                        "page_number": page_num + 1,
+                        "figure_index": figure_index,
+                        "text": description,
+                        "metadata": {
+                            "paper_id": paper_id,
+                            "title": title,
+                            "chunk_type": "figure",
+                            "page_number": page_num + 1,
+                        },
+                    }
+                    figure_chunks.append(chunk)
+                    figure_index += 1
+
+                    logger.debug(
+                        "Figure %d extracted from page %d of %s",
+                        figure_index, page_num + 1, paper_id,
+                    )
+
+                except Exception as e:
+                    logger.warning(
+                        "Failed to extract image xref=%d from page %d of %s: %s",
+                        xref, page_num + 1, paper_id, e,
+                    )
+                    continue
+
+        doc.close()
+
+        logger.info(
+            "Extracted %d figure chunks from %s (%s)",
+            len(figure_chunks), paper_id, pdf_path,
+        )
+        return figure_chunks
+
+    # ── Table Extraction ─────────────────────────────────────────────────
+
+    def extract_tables_as_markdown(
+        self,
+        pdf_path: str,
+        paper_id: str,
+        title: str,
+    ) -> list[dict]:
+        """
+        Extract tabular content from a PDF and convert to markdown format.
+
+        Uses fitz to find text blocks with tabular structure (multiple
+        tab/space-separated columns), then calls Qwen2.5-VL to produce
+        clean markdown tables.
+
+        Args:
+            pdf_path: Path to the PDF file
+            paper_id: ArXiv paper ID
+            title: Paper title
+
+        Returns:
+            List of chunk dicts with chunk_type="table"
+        """
+        pdf_path_obj = Path(pdf_path)
+        if not pdf_path_obj.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+        doc = fitz.open(pdf_path)
+        table_chunks = []
+        table_index = 0
+
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+
+            # Try pymupdf's built-in table finder first
+            try:
+                tables = page.find_tables()
+                for table in tables:
+                    table_data = table.extract()
+                    if not table_data or len(table_data) < 2:
+                        continue
+
+                    # Convert raw table data to a text block for VL processing
+                    raw_text = "\n".join(
+                        "\t".join(str(cell) if cell else "" for cell in row)
+                        for row in table_data
+                    )
+
+                    # Render the page region as an image for VL
+                    rect = table.bbox
+                    clip = fitz.Rect(rect)
+                    pix = page.get_pixmap(clip=clip, dpi=150)
+                    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                    img.thumbnail(
+                        (MAX_THUMBNAIL_SIZE, MAX_THUMBNAIL_SIZE),
+                        Image.LANCZOS,
+                    )
+
+                    # Call VL model to produce clean markdown
+                    response = self.client.visual_question_answering(
+                        image=img,
+                        question=(
+                            "Convert this to a clean markdown table. "
+                            "If not a table, return the text as-is. Plain text only."
+                        ),
+                    )
+
+                    if isinstance(response, list) and len(response) > 0:
+                        md_text = response[0].get("answer", "").strip()
+                    elif hasattr(response, "generated_text"):
+                        md_text = response.generated_text.strip()
+                    elif isinstance(response, str):
+                        md_text = response.strip()
+                    else:
+                        md_text = raw_text  # Fallback to raw extraction
+
+                    if not md_text:
+                        md_text = raw_text
+
+                    chunk = {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "chunk_type": "table",
+                        "page_number": page_num + 1,
+                        "figure_index": table_index,
+                        "text": md_text,
+                        "metadata": {
+                            "paper_id": paper_id,
+                            "title": title,
+                            "chunk_type": "table",
+                            "page_number": page_num + 1,
+                        },
+                    }
+                    table_chunks.append(chunk)
+                    table_index += 1
+
+            except Exception as e:
+                logger.warning(
+                    "Table extraction failed on page %d of %s: %s",
+                    page_num + 1, paper_id, e,
+                )
+                continue
+
+            # Fallback: scan text blocks for tabular patterns
+            if not table_chunks:
+                blocks = page.get_text("blocks")
+                for block in blocks:
+                    text = block[4] if len(block) > 4 else ""
+                    if not isinstance(text, str):
+                        continue
+
+                    lines = text.strip().split("\n")
+                    if len(lines) < 3:
+                        continue
+
+                    # Heuristic: a block is tabular if most lines have
+                    # multiple tab or multi-space separated columns
+                    tabular_lines = sum(
+                        1 for line in lines
+                        if len(re.split(r"\t|  {2,}", line.strip())) >= 3
+                    )
+
+                    if tabular_lines / len(lines) < 0.5:
+                        continue
+
+                    chunk = {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "chunk_type": "table",
+                        "page_number": page_num + 1,
+                        "figure_index": table_index,
+                        "text": text.strip(),
+                        "metadata": {
+                            "paper_id": paper_id,
+                            "title": title,
+                            "chunk_type": "table",
+                            "page_number": page_num + 1,
+                        },
+                    }
+                    table_chunks.append(chunk)
+                    table_index += 1
+
+        doc.close()
+
+        logger.info(
+            "Extracted %d table chunks from %s (%s)",
+            len(table_chunks), paper_id, pdf_path,
+        )
+        return table_chunks
 
 
-# ── Main Pipeline ────────────────────────────────────────────────────────────
+# ── Convenience Function ─────────────────────────────────────────────────────
 
-def extract_figures_tables(
+def extract_all_visuals(
     pdf_path: str,
-    paper_id: str = "",
-    title: str = "",
-    authors: str = "",
-    year: str = "",
+    paper_id: str,
+    title: str,
+    hf_token: str = None,
 ) -> list[dict]:
     """
-    Extract figure and table descriptions from a PDF paper.
+    Extract all figures and tables from a PDF.
+
+    Convenience wrapper that creates a FigureExtractor and runs both
+    extraction methods.
 
     Args:
         pdf_path: Path to the PDF file
         paper_id: ArXiv paper ID
         title: Paper title
-        authors: Paper authors
-        year: Publication year
+        hf_token: Optional HF token override
 
     Returns:
-        List of chunk dicts with chunk_type="figure" or "table"
+        Combined list of figure and table chunk dicts
     """
-    pdf_path_obj = Path(pdf_path)
-    if not pdf_path_obj.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
-
-    model, processor = _load_vision_model()
-
-    logger.info("Rendering PDF pages: %s", pdf_path)
-    pages = _render_pdf_pages(pdf_path)
-    logger.info("Rendered %d pages", len(pages))
-
-    all_chunks = []
-    chunk_index = 0
-
-    for page_num, page_image in enumerate(pages):
-        items = _analyze_page(page_image, page_num, model, processor)
-
-        for item in items:
-            chunk_type = "figure" if item.get("type", "").lower() == "figure" else "table"
-            description = (
-                f"{item.get('number', chunk_type.title())} "
-                f"(Page {page_num + 1}): "
-                f"{item.get('description', '')} "
-                f"{item.get('significance', '')}"
-            ).strip()
-
-            chunk = {
-                "paper_id": paper_id,
-                "title": title,
-                "authors": authors,
-                "year": year,
-                "chunk_index": chunk_index,
-                "chunk_type": chunk_type,
-                "text": description,
-                "page_num": page_num + 1,
-            }
-            all_chunks.append(chunk)
-            chunk_index += 1
-
-    logger.info(
-        "Extracted %d figures/tables from %s",
-        len(all_chunks), pdf_path,
-    )
-    return all_chunks
+    extractor = FigureExtractor(hf_token=hf_token)
+    figures = extractor.extract_from_pdf(pdf_path, paper_id, title)
+    tables = extractor.extract_tables_as_markdown(pdf_path, paper_id, title)
+    return figures + tables
 
 
 # ── CLI Entry Point ──────────────────────────────────────────────────────────
@@ -266,10 +365,13 @@ if __name__ == "__main__":
     )
 
     if len(sys.argv) < 2:
-        print("Usage: python -m src.pipeline.vision <pdf_path> [paper_id]")
+        print("Usage: python -m src.pipeline.vision <pdf_path> [paper_id] [title]")
         sys.exit(1)
 
     pdf = sys.argv[1]
     pid = sys.argv[2] if len(sys.argv) > 2 else "unknown"
-    results = extract_figures_tables(pdf, paper_id=pid)
+    ttl = sys.argv[3] if len(sys.argv) > 3 else ""
+
+    results = extract_all_visuals(pdf, paper_id=pid, title=ttl)
     print(json.dumps(results, indent=2))
+    print(f"\nTotal: {len(results)} chunks extracted")

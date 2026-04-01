@@ -1,0 +1,12 @@
+DEMO VIDEO
+==========
+
+Paste your Loom or YouTube demo link below:
+
+→ [INSERT LINK HERE]
+
+This video should demonstrate:
+1. Running the ingestion pipeline (ingest → chunk → embed)
+2. Querying the system with a complex research question
+3. Viewing the agent's planning, retrieval, analysis, and critic stages
+4. Reviewing the evaluation metrics and critic report

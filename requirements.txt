@@ -1,0 +1,27 @@
+# ── Core LLM & Inference ──────────────────────────────────────
+huggingface-hub>=0.23.0
+transformers>=4.45.0
+accelerate
+bitsandbytes
+torch
+
+# ── Embeddings & Retrieval ────────────────────────────────────
+sentence-transformers
+rank-bm25
+pylate
+chromadb
+
+# ── LangChain Integration ────────────────────────────────────
+langchain
+langchain-huggingface
+langchain-community
+
+# ── Document Processing ──────────────────────────────────────
+pymupdf
+pillow
+
+# ── Utilities ────────────────────────────────────────────────
+tenacity
+sqlalchemy
+tqdm
+kaggle

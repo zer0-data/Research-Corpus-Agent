@@ -1,0 +1,252 @@
+[
+  {
+    "query": "What are the latest approaches to efficient attention mechanisms for long document understanding?",
+    "relevant_paper_ids": ["2009.14794", "2004.05150", "2006.04768"],
+    "category": "methodological"
+  },
+  {
+    "query": "How does RLHF improve alignment in large language models?",
+    "relevant_paper_ids": ["2203.02155", "2204.05862", "2302.05206"],
+    "category": "factual"
+  },
+  {
+    "query": "Compare different knowledge distillation techniques for transformer models",
+    "relevant_paper_ids": ["1910.01108", "2002.11794", "2012.15524"],
+    "category": "comparative"
+  },
+  {
+    "query": "What is the role of chain-of-thought prompting in reasoning tasks?",
+    "relevant_paper_ids": ["2201.11903", "2203.11171", "2205.11916"],
+    "category": "factual"
+  },
+  {
+    "query": "Survey recent advances in text-to-image diffusion models",
+    "relevant_paper_ids": ["2112.10752", "2205.11487", "2204.06125"],
+    "category": "survey"
+  },
+  {
+    "query": "How do vision-language models handle spatial reasoning?",
+    "relevant_paper_ids": ["2304.08485", "2305.06500", "2310.03744"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are the challenges of multilingual NLP models?",
+    "relevant_paper_ids": ["1911.02116", "2004.09813", "2010.11934"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare GAN-based and diffusion-based image generation approaches",
+    "relevant_paper_ids": ["2105.05233", "2006.11239", "2207.12598"],
+    "category": "comparative"
+  },
+  {
+    "query": "What techniques are used for reducing hallucination in LLMs?",
+    "relevant_paper_ids": ["2302.04023", "2305.14564", "2311.05232"],
+    "category": "methodological"
+  },
+  {
+    "query": "How does retrieval-augmented generation improve factual accuracy?",
+    "relevant_paper_ids": ["2005.11401", "2301.12652", "2302.00083"],
+    "category": "factual"
+  },
+  {
+    "query": "What are the state-of-the-art methods for neural machine translation?",
+    "relevant_paper_ids": ["1706.03762", "1809.00158", "2207.04672"],
+    "category": "survey"
+  },
+  {
+    "query": "Explain the differences between autoregressive and masked language models",
+    "relevant_paper_ids": ["1810.04805", "2005.14165", "1906.08237"],
+    "category": "comparative"
+  },
+  {
+    "query": "What are the recent trends in federated learning for NLP?",
+    "relevant_paper_ids": ["2005.05930", "2111.01236", "2206.07087"],
+    "category": "trend"
+  },
+  {
+    "query": "How do graph neural networks handle heterogeneous data?",
+    "relevant_paper_ids": ["2005.03675", "2106.09700", "2110.13094"],
+    "category": "methodological"
+  },
+  {
+    "query": "What optimizations exist for training large-scale transformer models?",
+    "relevant_paper_ids": ["1904.10509", "1910.02054", "2205.05198"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare few-shot learning approaches using prompting vs fine-tuning",
+    "relevant_paper_ids": ["2005.14165", "2103.10385", "2109.01652"],
+    "category": "comparative"
+  },
+  {
+    "query": "What are the applications of contrastive learning in NLP?",
+    "relevant_paper_ids": ["2005.12766", "2104.08821", "2201.10005"],
+    "category": "survey"
+  },
+  {
+    "query": "How does mixture of experts scaling work in transformer architectures?",
+    "relevant_paper_ids": ["2101.03961", "2112.06905", "2305.14705"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are the best practices for evaluating generative AI models?",
+    "relevant_paper_ids": ["2303.08774", "2302.06476", "2305.18290"],
+    "category": "methodological"
+  },
+  {
+    "query": "Discuss the impact of data quality on model performance",
+    "relevant_paper_ids": ["2203.10735", "2112.11446", "2305.11206"],
+    "category": "factual"
+  },
+  {
+    "query": "How do self-supervised learning methods work for computer vision?",
+    "relevant_paper_ids": ["2104.14294", "2011.10566", "2111.06377"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are the privacy concerns with large language models?",
+    "relevant_paper_ids": ["2012.07805", "2202.07646", "2305.01223"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare different tokenization strategies for subword models",
+    "relevant_paper_ids": ["1508.07909", "1804.10959", "2012.15613"],
+    "category": "comparative"
+  },
+  {
+    "query": "How is reinforcement learning used in robot manipulation tasks?",
+    "relevant_paper_ids": ["2104.05698", "2209.00588", "2303.04137"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are recent advances in code generation using LLMs?",
+    "relevant_paper_ids": ["2107.03374", "2203.13474", "2305.06161"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare different approaches to neural architecture search",
+    "relevant_paper_ids": ["1802.03268", "1806.09055", "2008.00719"],
+    "category": "comparative"
+  },
+  {
+    "query": "How do multi-modal models integrate text and image information?",
+    "relevant_paper_ids": ["2103.00020", "2204.14198", "2305.11175"],
+    "category": "methodological"
+  },
+  {
+    "query": "What is the role of attention mechanisms in speech recognition?",
+    "relevant_paper_ids": ["2006.11477", "2010.10504", "2212.04356"],
+    "category": "factual"
+  },
+  {
+    "query": "Survey the field of commonsense reasoning in AI",
+    "relevant_paper_ids": ["1811.00937", "2104.05240", "2210.12217"],
+    "category": "survey"
+  },
+  {
+    "query": "How do pruning methods affect transformer model performance?",
+    "relevant_paper_ids": ["2002.11089", "2111.05754", "2301.00774"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are the trends in AI safety research?",
+    "relevant_paper_ids": ["2109.13916", "2206.02841", "2305.15324"],
+    "category": "trend"
+  },
+  {
+    "query": "Compare zero-shot and few-shot capabilities across different LLM families",
+    "relevant_paper_ids": ["2005.14165", "2302.13971", "2307.09288"],
+    "category": "comparative"
+  },
+  {
+    "query": "How does in-context learning emerge in large language models?",
+    "relevant_paper_ids": ["2202.12837", "2301.00234", "2211.15661"],
+    "category": "factual"
+  },
+  {
+    "query": "What methods exist for detecting AI-generated text?",
+    "relevant_paper_ids": ["2301.10226", "2303.11156", "2305.15047"],
+    "category": "methodological"
+  },
+  {
+    "query": "Discuss the role of synthetic data in training language models",
+    "relevant_paper_ids": ["2305.13735", "2306.04849", "2308.09936"],
+    "category": "factual"
+  },
+  {
+    "query": "How do parameter-efficient fine-tuning methods like LoRA work?",
+    "relevant_paper_ids": ["2106.09685", "2205.05638", "2305.02301"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are the challenges in multimodal sentiment analysis?",
+    "relevant_paper_ids": ["2107.05709", "2203.10271", "2306.05672"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare different pre-training objectives for language models",
+    "relevant_paper_ids": ["1810.04805", "1907.11692", "2003.10555"],
+    "category": "comparative"
+  },
+  {
+    "query": "How are transformers applied to protein structure prediction?",
+    "relevant_paper_ids": ["2007.01126", "2106.07994", "2209.00796"],
+    "category": "methodological"
+  },
+  {
+    "query": "What techniques improve the calibration of neural network predictions?",
+    "relevant_paper_ids": ["1706.04599", "2105.02304", "2207.05221"],
+    "category": "methodological"
+  },
+  {
+    "query": "Survey instruction tuning methods for large language models",
+    "relevant_paper_ids": ["2109.01652", "2210.11416", "2304.03277"],
+    "category": "survey"
+  },
+  {
+    "query": "How does curriculum learning affect model training efficiency?",
+    "relevant_paper_ids": ["2003.06505", "2108.02170", "2212.09539"],
+    "category": "factual"
+  },
+  {
+    "query": "What are the state-of-the-art methods for open-domain question answering?",
+    "relevant_paper_ids": ["2004.04906", "2101.00436", "2208.03299"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare attention-based and convolution-based approaches for NLP tasks",
+    "relevant_paper_ids": ["1706.03762", "1904.10764", "2102.06356"],
+    "category": "comparative"
+  },
+  {
+    "query": "What is the impact of model size on emergent abilities?",
+    "relevant_paper_ids": ["2206.07682", "2303.12712", "2309.01809"],
+    "category": "trend"
+  },
+  {
+    "query": "How do constitutional AI methods work for alignment?",
+    "relevant_paper_ids": ["2212.08073", "2305.18290", "2310.06692"],
+    "category": "methodological"
+  },
+  {
+    "query": "What are the recent developments in continual learning for neural networks?",
+    "relevant_paper_ids": ["1904.07734", "2205.02014", "2302.00487"],
+    "category": "survey"
+  },
+  {
+    "query": "Compare different document retrieval strategies for knowledge-intensive tasks",
+    "relevant_paper_ids": ["2005.11401", "2112.09118", "2302.00083"],
+    "category": "comparative"
+  },
+  {
+    "query": "How do embedding models capture semantic similarity?",
+    "relevant_paper_ids": ["1908.10084", "2201.10005", "2212.03533"],
+    "category": "factual"
+  },
+  {
+    "query": "What are the key challenges in deploying LLMs at production scale?",
+    "relevant_paper_ids": ["2302.06476", "2303.17580", "2306.09896"],
+    "category": "trend"
+  }
+]
